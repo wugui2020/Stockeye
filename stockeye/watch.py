@@ -62,7 +62,7 @@ def buildGraph(text):
 def summarize(text, length, firstlast = False):
     vertices = buildGraph(text)
     all_ord = sorted(vertices, key=lambda v: v.order)
-    mos_sig = sorted(vertices, key=lambda v: v.score, reverse=True)[0:length]
+    mos_sig = sorted(vertices, key=lambda v: v.score, reverse=True)
     mos_sig_ord = sorted(mos_sig, key=lambda v: v.order)
         
     if firstlast:
@@ -140,12 +140,10 @@ def stats_HTML(symbol, statistics, properties):
     return stats+'</table><br><hr><br></center>'
 
 def outline_HTML(i, title, link, time, summary):
-    title_HTML = '<br>'+str(i+1)+'. <b><a href="'+link+'">'+title+'</a></b><br>' 
-    time_HTML = 'Posted '+time+'<br>'
-    summary_HTML = ''    
-    for sentence in summary:
-        summary_HTML += '<br><i>'+sentence+'<br></i>'
-    return title_HTML+time_HTML+summary_HTML
+    title_HTML = title
+    time_HTML = time
+    summary_HTML = '\n'.join(summary)   
+    return "\n".join([title_HTML, time_HTML, summary_HTML])
 
 def subject_HTML(symbol):
     subject = 'Recent News Activity for '+symbol
@@ -153,7 +151,6 @@ def subject_HTML(symbol):
 
 def body_HTML(symbol, statistics, properties, articles):
     body = ''
-    body += stats_HTML(symbol, statistics, properties)
     for i, a in enumerate(articles):
         body += outline_HTML(i, a.title, a.link, a.time, a.summary)
     return body    
@@ -224,41 +221,35 @@ def unique(title, articles):
     return True
 
 def createURLs(query, pages):
-    pages = (10 * x for x in xrange(0, pages))
     lower = query.lower().replace(' ', '+')
-    urls = ['https://www.google.com/search?q="%s"&tbm=nws&tbs=qdr:y#q="%s"&safe=active&tbs=qdr:y,sbd:1&tbm=nws&start=%s' % (lower, lower, x) for i, x in enumerate(pages)]
+    urls = ['https://www.google.com/search?q=%s&tbs=sbd:1,qdr:d&tbm=nws&dpr=1' % lower]
     return urls
   
 def grabArticles(query, pages, rest = 0):
-    urls = createURLs(query, pages)
     headers = {'user-agent': 'Mozilla/5.0 (Windows NT 6.1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/41.0.2228.0 Safari/537.36'}
     articles = []
-    for url in urls:
-        response = get(url, headers=headers)
+    url = 'https://www.google.com/search?q=%s&tbs=sbd:1,qdr:d&tbm=nws&dpr=1' % query.replace(' ', '+')
+    while pages:
+        try:
+            response = get(url, headers=headers)
+        except:
+            break
         soup = BeautifulSoup(response.text, "html.parser") 
-        objects_HId = soup.find_all("a", class_="l._HId")
-        objects_sQb = soup.find_all("a", class_="_sQb")
-        
-        for a in objects_HId:
+        objects_HId = soup.find_all("div", class_="_hJs")
+
+        for entry in objects_HId:
+            a = entry.find("a", class_="l _PMs")
             title = a.get_text()
             link = a['href']
-            try:
-                time = a.parent.find("span", class_="_uQb").text
-            except AttributeError: 
-                time = a.parent.parent.find("span", class_="_uQb").text
+            time = entry.find("span", class_="f nsa _QHs").text
             if unique(title, articles):
                 articles.append(article(title, link, time))
+        print '\n'
+        url = soup.find('a', id='pnnext', class_='pn')
+        if url:
+            url = 'https://www.google.com' + url['href']
+        pages -= 1
 
-        for a in objects_sQb:
-            title =  a.get_text()
-            link = a['href']
-            try:
-                time = a.parent.find("span", class_="_uQb").text
-            except AttributeError:
-                time = a.parent.parent.find("span", class_="_uQb").text
-            if unique(title, articles):
-                articles.append(article(title, link, time))
-               
         sleep(randint(float(rest)/2, rest))
     return articles   
 
@@ -303,7 +294,7 @@ def sortArticles(articles):
 
 # ----- The Mastermind ---------------------------------------------------------
 
-def watch(credentials, ticks, properties = [], threshold = 5, hourspast = 18, sentences = 3, firstlast = False):
+def watch(ticks, datetime, mongo_connection, properties = [], threshold = 5, hourspast = 18, sentences = 3, firstlast = False):
     if threshold <= 0:
         print "Please choose a threshold greater than 0."
         return         
@@ -319,25 +310,27 @@ def watch(credentials, ticks, properties = [], threshold = 5, hourspast = 18, se
     else: print "This run will take approximately %s minutes" % (str(estimate/60))    
     
     url = yahooURL(ticks)
-    stats = yahooRequest(url, properties)
     remove = ['class', 'common', 'stock']
-    for symbol in stats:
-        name = stats[symbol]['Name']
+    for name in ticks:
         if name:
-            print "Finding news for %s" % (symbol)
-            query = (' '.join([w for w in name.split() if w.lower() not in remove]))+' '+symbol
-            articles = grabArticles(query, 2, 20)
+            print "Finding news for %s" % (name)
+            response = get('https://finance.yahoo.com/quote/%s' % name)
+            soup = BeautifulSoup(response.text, 'html')
+            query = soup.find("h1").text.replace(' - ', ' ')
+            print query
+            articles = grabArticles(query, 5, 20)
             articles = summarizeArticles(articles, sentences, firstlast)
             articles = sortArticles(articles) 
 
             recentArticles = []
-            for a in articles:
-                hoursago = float((datetime.now()-a.order).total_seconds())/3600
-                if hoursago <= hourspast:
-                    recentArticles.append(a)    
-            if len(recentArticles) >= threshold:
-                subject = subject_HTML(symbol)
-                body = body_HTML(symbol, stats, properties, recentArticles)
-                sendEmail(subject, body, credentials)
+            for article in articles:
+                mongo_connection.wentaotrade.news.insert_one(
+                    {
+                        "name": name,
+                        "datetime": datetime,
+                        "title": article.title,
+                        "content": article.summary
+                    }
+                )
         else:
-            print "Coudn't find any company for %s" % (symbol)
+            print "Coudn't find any company for %s" % (name)
